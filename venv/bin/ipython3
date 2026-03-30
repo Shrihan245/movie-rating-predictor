@@ -1,6 +1,0 @@
-#!/Users/shrihanbodapati/Documents/PYTHON/movie-rating-predictor/venv/bin/python3.13
-import sys
-from IPython import start_ipython
-if __name__ == '__main__':
-    sys.argv[0] = sys.argv[0].removesuffix('.exe')
-    sys.exit(start_ipython())
