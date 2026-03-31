@@ -2,6 +2,8 @@
 
 A machine learning project that predicts movie ratings using the MovieLens 100K dataset — combining data science fundamentals with a deployable REST API.
 
+![App Preview](movie-predictor-preview.png)
+
 ## What It Does
 
 | Component | Description |
