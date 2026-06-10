@@ -1,6 +1,5 @@
 import pickle
 import pandas as pd
-import os
 
 def load_model():
     model_path = 'model/movie_rating_model.pkl'
