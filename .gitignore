@@ -3,4 +3,4 @@ __pycache__/
 *.pkl
 model/
 .DS_Store
-data/raw/
+data/raw/venv/
