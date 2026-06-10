@@ -1,8 +1,17 @@
 import pickle
 import pandas as pd
+import os
 
 def load_model():
-    with open('model/movie_rating_model.pkl', 'rb') as f:
+    model_path = 'model/movie_rating_model.pkl'
+    
+    # If model doesn't exist, train it automatically
+    if not os.path.exists(model_path):
+        print("Model not found. Training...")
+        from src.train import train
+        train()
+    
+    with open(model_path, 'rb') as f:
         model = pickle.load(f)
     return model
 
