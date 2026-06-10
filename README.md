@@ -2,6 +2,8 @@
 
 A machine learning project that predicts movie ratings using the MovieLens 100K dataset — combining data science fundamentals with a deployable REST API.
 
+**Live demo:** [https://movie-rating-predictor-lgej.onrender.com](https://movie-rating-predictor-lgej.onrender.com)
+
 ![App Preview](movie-rating-preview.png)
 
 ## What It Does
