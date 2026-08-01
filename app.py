@@ -1,15 +1,90 @@
-from fastapi import FastAPI
+from dotenv import load_dotenv
+load_dotenv()
+
+import json
+import random
+import pandas as pd
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
-from src.predict import predict_rating
+
+from src.predict import predict_rating, UnknownMovieError, UnknownUserError, load_user_features
+from src.tmdb_client import get_poster_and_overview
 
 app = FastAPI()
 
-class MovieInput(BaseModel):
+with open("data/processed/movies_lookup.json") as f:
+    MOVIES = json.load(f)  # list of {movie_id, title, year, genres}
+
+MOVIES_BY_ID = {m["movie_id"]: m for m in MOVIES}
+
+_movie_features = pd.read_csv("data/processed/movie_features.csv").set_index("movie_id")
+_popular_movie_ids = _movie_features.sort_values("num_ratings", ascending=False).index.tolist()
+
+
+class PredictRequest(BaseModel):
     user_id: int
     movie_id: int
-    num_ratings: int
-    avg_rating: float
+
+
+@app.get("/api/movies/popular")
+def popular_movies(limit: int = 48):
+    results = []
+    for movie_id in _popular_movie_ids[:limit]:
+        movie = MOVIES_BY_ID.get(int(movie_id))
+        if not movie:
+            continue
+        poster_info = get_poster_and_overview(movie["title"], movie.get("year"))
+        results.append({**movie, **poster_info})
+    return {"results": results}
+
+
+@app.get("/api/movies/search")
+def search_movies(q: str, limit: int = 24):
+    if not q or len(q) < 2:
+        return {"results": []}
+    q_lower = q.lower()
+    matches = [m for m in MOVIES if q_lower in m["title"].lower()]
+    results = []
+    for movie in matches[:limit]:
+        poster_info = get_poster_and_overview(movie["title"], movie.get("year"))
+        results.append({**movie, **poster_info})
+    return {"results": results}
+
+
+@app.get("/api/movies/{movie_id}")
+def get_movie(movie_id: int):
+    movie = MOVIES_BY_ID.get(movie_id)
+    if not movie:
+        raise HTTPException(status_code=404, detail="Movie not found")
+    poster_info = get_poster_and_overview(movie["title"], movie.get("year"))
+    return {**movie, **poster_info}
+
+
+@app.get("/api/users/random")
+def random_user():
+    user_features = load_user_features()
+    user_id = int(random.choice(user_features.index.tolist()))
+    return {"user_id": user_id}
+
+
+@app.post("/predict")
+def predict(req: PredictRequest):
+    try:
+        rating = predict_rating(user_id=req.user_id, movie_id=req.movie_id)
+    except UnknownMovieError:
+        raise HTTPException(status_code=404, detail=f"movie_id {req.movie_id} not found in dataset")
+    except UnknownUserError:
+        raise HTTPException(status_code=404, detail=f"user_id {req.user_id} not found in dataset (try 1-943)")
+
+    movie = MOVIES_BY_ID.get(req.movie_id, {})
+    poster_info = get_poster_and_overview(movie.get("title", ""), movie.get("year")) if movie else {}
+
+    return {
+        "predicted_rating": rating,
+        "movie": {**movie, **poster_info},
+    }
+
 
 @app.get("/", response_class=HTMLResponse)
 def home():
@@ -22,245 +97,242 @@ def home():
         <title>Movie Rating Predictor</title>
         <style>
             * { margin: 0; padding: 0; box-sizing: border-box; }
-            body { 
+            body {
                 font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                background: #14141f;
+                color: #eee;
                 min-height: 100vh;
-                display: flex;
-                align-items: center;
-                justify-content: center;
-                padding: 20px;
             }
-            .container {
-                background: white;
-                border-radius: 12px;
-                box-shadow: 0 10px 40px rgba(0,0,0,0.2);
-                max-width: 600px;
-                width: 100%;
-                padding: 40px;
+            header {
+                position: sticky; top: 0; z-index: 20;
+                background: linear-gradient(180deg, #1c1c2b 0%, #1c1c2bcc 90%, transparent);
+                padding: 18px 28px 24px;
+                display: flex; flex-wrap: wrap; gap: 16px; align-items: center;
+                justify-content: space-between;
             }
-            h1 {
-                color: #333;
-                margin-bottom: 10px;
-                font-size: 28px;
+            .title { font-size: 20px; font-weight: 700; white-space: nowrap; }
+            .title span { color: #a78bfa; }
+            .controls { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+            .user-box {
+                display: flex; align-items: center; gap: 6px;
+                background: #24243a; border-radius: 8px; padding: 6px 10px;
             }
-            .subtitle {
-                color: #666;
-                margin-bottom: 30px;
-                font-size: 14px;
+            .user-box label { font-size: 12px; color: #999; white-space: nowrap; }
+            .user-box input {
+                width: 60px; background: transparent; border: none; color: #fff;
+                font-size: 14px; outline: none;
             }
-            .form-group {
-                margin-bottom: 20px;
+            .dice-btn {
+                background: #2d2d45; border: none; border-radius: 6px;
+                width: 32px; height: 32px; cursor: pointer; font-size: 15px;
             }
-            label {
-                display: block;
-                color: #333;
-                font-weight: 500;
-                margin-bottom: 8px;
-                font-size: 14px;
+            .dice-btn:hover { background: #3a3a58; }
+            .search-box {
+                background: #24243a; border-radius: 8px; padding: 8px 14px;
+                min-width: 220px; flex: 1; max-width: 340px;
             }
-            input {
-                width: 100%;
-                padding: 12px;
-                border: 2px solid #e0e0e0;
-                border-radius: 6px;
-                font-size: 14px;
-                transition: border-color 0.3s;
+            .search-box input {
+                width: 100%; background: transparent; border: none; color: #fff;
+                font-size: 14px; outline: none;
             }
-            input:focus {
-                outline: none;
-                border-color: #667eea;
+            .search-box input::placeholder { color: #777; }
+            main { padding: 8px 28px 60px; }
+            .section-label {
+                font-size: 14px; color: #999; margin: 18px 0 14px; letter-spacing: 0.3px;
             }
-            button {
-                width: 100%;
-                padding: 14px;
-                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-                color: white;
-                border: none;
-                border-radius: 6px;
-                font-size: 16px;
-                font-weight: 600;
-                cursor: pointer;
-                transition: transform 0.2s, box-shadow 0.2s;
-            }
-            button:hover {
-                transform: translateY(-2px);
-                box-shadow: 0 6px 20px rgba(102, 126, 234, 0.4);
-            }
-            button:active {
-                transform: translateY(0);
-            }
-            .results {
-                margin-top: 30px;
-                display: none;
-            }
-            .result-card {
-                background: #f8f9fa;
-                border: 2px solid #e0e0e0;
-                border-radius: 8px;
-                padding: 20px;
-                margin-bottom: 15px;
-            }
-            .result-label {
-                color: #666;
-                font-size: 13px;
-                margin-bottom: 8px;
-                text-transform: uppercase;
-                letter-spacing: 0.5px;
-            }
-            .result-value {
-                font-size: 32px;
-                font-weight: 700;
-                color: #667eea;
-            }
-            .comparison {
+            .grid {
                 display: grid;
-                grid-template-columns: 1fr 1fr;
-                gap: 12px;
-                margin-top: 20px;
+                grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+                gap: 18px;
             }
-            .comparison-item {
-                text-align: center;
-                padding: 12px;
-                background: white;
-                border-radius: 6px;
-                border: 1px solid #e0e0e0;
+            .card {
+                background: #1c1c2b; border-radius: 10px; overflow: hidden;
+                cursor: pointer; transition: transform 0.15s;
+                position: relative;
             }
-            .comparison-label {
-                color: #666;
-                font-size: 12px;
-                margin-bottom: 6px;
+            .card:hover { transform: translateY(-4px); }
+            .poster-wrap {
+                width: 100%; aspect-ratio: 2 / 3; background: #2a2a40;
+                display: flex; align-items: center; justify-content: center;
+                font-size: 34px; overflow: hidden; position: relative;
             }
-            .comparison-value {
-                font-size: 24px;
-                font-weight: 600;
-                color: #333;
-            }
-            .loading {
+            .poster-wrap img { width: 100%; height: 100%; object-fit: cover; }
+            .rating-badge {
+                position: absolute; top: 8px; right: 8px;
+                background: rgba(20,20,31,0.9); color: #ffd166;
+                font-size: 12px; font-weight: 700; padding: 4px 8px; border-radius: 6px;
                 display: none;
-                text-align: center;
-                color: #667eea;
-                font-size: 14px;
             }
-            .error {
-                display: none;
-                background: #fee;
-                border: 1px solid #f99;
-                color: #c33;
-                padding: 12px;
-                border-radius: 6px;
-                margin-bottom: 20px;
-                font-size: 13px;
+            .rating-badge.active { display: block; }
+            .card-info { padding: 10px 10px 12px; }
+            .card-info .title { font-size: 12.5px; font-weight: 600; line-height: 1.3;
+                display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+            .card-info .meta { font-size: 11px; color: #888; margin-top: 4px; }
+            .empty-state { text-align: center; color: #777; padding: 60px 20px; font-size: 14px; }
+
+            .modal-overlay {
+                display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.7);
+                z-index: 100; align-items: center; justify-content: center; padding: 20px;
             }
+            .modal-overlay.active { display: flex; }
+            .modal {
+                background: #1c1c2b; border-radius: 14px; max-width: 420px; width: 100%;
+                padding: 24px; text-align: center;
+            }
+            .modal .poster-wrap { width: 140px; aspect-ratio: 2/3; margin: 0 auto 16px; border-radius: 8px; }
+            .modal h2 { font-size: 17px; margin-bottom: 4px; }
+            .modal .meta { font-size: 12.5px; color: #999; margin-bottom: 18px; }
+            .modal .predicted { font-size: 42px; font-weight: 800; color: #ffd166; margin: 8px 0 4px; }
+            .modal .predicted-label { font-size: 12px; color: #999; text-transform: uppercase; letter-spacing: 0.5px; }
+            .modal .close-btn {
+                margin-top: 18px; background: #2d2d45; border: none; color: #eee;
+                padding: 10px 22px; border-radius: 8px; cursor: pointer; font-size: 13px;
+            }
+            .modal .close-btn:hover { background: #3a3a58; }
+            .modal .loading-spinner { font-size: 13px; color: #999; padding: 20px 0; }
         </style>
     </head>
     <body>
-        <div class="container">
-            <h1>🎬 Movie Rating Predictor</h1>
-            <p class="subtitle">Predict what rating a user will give to a movie</p>
-            
-            <div class="error" id="error"></div>
-            
-            <form id="predictForm">
-                <div class="form-group">
-                    <label for="userId">User ID</label>
-                    <input type="number" id="userId" name="user_id" placeholder="e.g., 1" required min="1">
+        <header>
+            <div class="title">🎬 Movie <span>Rating Predictor</span></div>
+            <div class="controls">
+                <div class="user-box">
+                    <label for="userId">User</label>
+                    <input type="number" id="userId" placeholder="1-943" min="1" max="943">
                 </div>
-                
-                <div class="form-group">
-                    <label for="movieId">Movie ID</label>
-                    <input type="number" id="movieId" name="movie_id" placeholder="e.g., 50" required min="1">
-                </div>
-                
-                <div class="form-group">
-                    <label for="numRatings">Number of Ratings (for this movie)</label>
-                    <input type="number" id="numRatings" name="num_ratings" placeholder="e.g., 100" required min="1">
-                </div>
-                
-                <div class="form-group">
-                    <label for="avgRating">Average Rating (for this movie)</label>
-                    <input type="number" id="avgRating" name="avg_rating" placeholder="e.g., 4.2" step="0.1" min="0.1" max="5" required>
-                </div>
-                
-                <button type="submit">Predict Rating</button>
-            </form>
-            
-            <div class="loading" id="loading">Predicting...</div>
-            
-            <div class="results" id="results">
-                <div class="result-card">
-                    <div class="result-label">Model Prediction (Random Forest)</div>
-                    <div class="result-value" id="prediction">-</div>
-                </div>
-                
-                <div style="font-size: 12px; color: #999; text-align: center; margin: 15px 0;">Model Performance</div>
-                
-                <div class="comparison">
-                    <div class="comparison-item">
-                        <div class="comparison-label">Your Model</div>
-                        <div class="comparison-value" id="modelRmse">1.03</div>
-                        <div style="font-size: 11px; color: #999;">RMSE</div>
-                    </div>
-                    <div class="comparison-item">
-                        <div class="comparison-label">Baseline (avg: 3.5)</div>
-                        <div class="comparison-value" id="baselineRmse">1.02</div>
-                        <div style="font-size: 11px; color: #999;">RMSE</div>
-                    </div>
+                <button class="dice-btn" id="randomUserBtn" title="Random user">🎲</button>
+                <div class="search-box">
+                    <input type="text" id="movieSearch" placeholder="Search movies..." autocomplete="off">
                 </div>
             </div>
+        </header>
+
+        <main>
+            <div class="section-label" id="sectionLabel">Most rated</div>
+            <div class="grid" id="grid"></div>
+            <div class="empty-state" id="emptyState" style="display:none;">No movies found.</div>
+        </main>
+
+        <div class="modal-overlay" id="modalOverlay">
+            <div class="modal">
+                <div class="poster-wrap" id="modalPosterWrap">🎞️</div>
+                <h2 id="modalTitle"></h2>
+                <div class="meta" id="modalMeta"></div>
+                <div id="modalBody">
+                    <div class="loading-spinner">Predicting...</div>
+                </div>
+                <button class="close-btn" id="closeModalBtn">Close</button>
+            </div>
         </div>
-        
+
         <script>
-            document.getElementById('predictForm').addEventListener('submit', async (e) => {
-                e.preventDefault();
-                
-                const userId = parseInt(document.getElementById('userId').value);
-                const movieId = parseInt(document.getElementById('movieId').value);
-                const numRatings = parseInt(document.getElementById('numRatings').value);
-                const avgRating = parseFloat(document.getElementById('avgRating').value);
-                
-                document.getElementById('loading').style.display = 'block';
-                document.getElementById('results').style.display = 'none';
-                document.getElementById('error').style.display = 'none';
-                
+            const grid = document.getElementById('grid');
+            const emptyState = document.getElementById('emptyState');
+            const sectionLabel = document.getElementById('sectionLabel');
+            const userIdInput = document.getElementById('userId');
+            const movieSearch = document.getElementById('movieSearch');
+            const modalOverlay = document.getElementById('modalOverlay');
+
+            function posterCell(movie) {
+                if (movie.poster_url) {
+                    return `<img src="${movie.poster_url}" loading="lazy">`;
+                }
+                return '🎞️';
+            }
+
+            function renderGrid(movies) {
+                grid.innerHTML = '';
+                emptyState.style.display = movies.length ? 'none' : 'block';
+                movies.forEach(movie => {
+                    const card = document.createElement('div');
+                    card.className = 'card';
+                    card.innerHTML = `
+                        <div class="poster-wrap">
+                            ${posterCell(movie)}
+                            <div class="rating-badge"></div>
+                        </div>
+                        <div class="card-info">
+                            <div class="title">${movie.title}</div>
+                            <div class="meta">${[movie.year, (movie.genres||[]).slice(0,2).join(', ')].filter(Boolean).join(' · ')}</div>
+                        </div>
+                    `;
+                    card.addEventListener('click', () => openModal(movie));
+                    grid.appendChild(card);
+                });
+            }
+
+            async function loadPopular() {
+                sectionLabel.textContent = 'Most rated';
+                const res = await fetch('/api/movies/popular?limit=48');
+                const data = await res.json();
+                renderGrid(data.results);
+            }
+
+            let debounceTimer = null;
+            movieSearch.addEventListener('input', () => {
+                clearTimeout(debounceTimer);
+                const q = movieSearch.value.trim();
+                if (!q) { loadPopular(); return; }
+                debounceTimer = setTimeout(async () => {
+                    sectionLabel.textContent = `Results for "${q}"`;
+                    const res = await fetch(`/api/movies/search?q=${encodeURIComponent(q)}`);
+                    const data = await res.json();
+                    renderGrid(data.results);
+                }, 300);
+            });
+
+            document.getElementById('randomUserBtn').addEventListener('click', async () => {
+                const res = await fetch('/api/users/random');
+                const data = await res.json();
+                userIdInput.value = data.user_id;
+            });
+
+            async function openModal(movie) {
+                modalOverlay.classList.add('active');
+                document.getElementById('modalTitle').textContent = movie.title;
+                document.getElementById('modalMeta').textContent =
+                    [movie.year, (movie.genres||[]).join(', ')].filter(Boolean).join(' · ');
+                const posterWrap = document.getElementById('modalPosterWrap');
+                posterWrap.innerHTML = movie.poster_url ? `<img src="${movie.poster_url}">` : '🎞️';
+
+                const modalBody = document.getElementById('modalBody');
+                modalBody.innerHTML = '<div class="loading-spinner">Predicting...</div>';
+
+                const userId = parseInt(userIdInput.value);
+                if (!userId) {
+                    modalBody.innerHTML = '<div class="loading-spinner">Pick a User ID up top first (or hit 🎲), then click a poster again.</div>';
+                    return;
+                }
+
                 try {
-                    const response = await fetch('/predict', {
+                    const res = await fetch('/predict', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({
-                            user_id: userId,
-                            movie_id: movieId,
-                            num_ratings: numRatings,
-                            avg_rating: avgRating
-                        })
+                        body: JSON.stringify({ user_id: userId, movie_id: movie.movie_id })
                     });
-                    
-                    if (!response.ok) {
-                        throw new Error('Prediction failed');
+                    if (!res.ok) {
+                        const err = await res.json();
+                        throw new Error(err.detail || 'Prediction failed');
                     }
-                    
-                    const data = await response.json();
-                    document.getElementById('prediction').textContent = data.predicted_rating;
-                    
-                    document.getElementById('loading').style.display = 'none';
-                    document.getElementById('results').style.display = 'block';
+                    const data = await res.json();
+                    modalBody.innerHTML = `
+                        <div class="predicted-label">Predicted Rating for User ${userId}</div>
+                        <div class="predicted">${data.predicted_rating} / 5</div>
+                    `;
                 } catch (err) {
-                    document.getElementById('loading').style.display = 'none';
-                    document.getElementById('error').style.display = 'block';
-                    document.getElementById('error').textContent = 'Error: ' + err.message;
+                    modalBody.innerHTML = `<div class="loading-spinner">Error: ${err.message}</div>`;
                 }
+            }
+
+            document.getElementById('closeModalBtn').addEventListener('click', () => {
+                modalOverlay.classList.remove('active');
             });
+            modalOverlay.addEventListener('click', (e) => {
+                if (e.target === modalOverlay) modalOverlay.classList.remove('active');
+            });
+
+            loadPopular();
         </script>
     </body>
     </html>
     """
-
-@app.post("/predict")
-def predict(input: MovieInput):
-    rating = predict_rating(
-        user_id=input.user_id,
-        movie_id=input.movie_id,
-        num_ratings=input.num_ratings,
-        avg_rating=input.avg_rating
-    )
-    return {"predicted_rating": rating}
