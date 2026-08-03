@@ -4,7 +4,7 @@ most popular movies. Commit the resulting poster_cache.json so the grid
 loads instantly on Render without hitting TMDB live on every cold start.
 
 Usage:
-    python3 src/warm_poster_cache.py
+    python3 -m src.warm_poster_cache
 """
 from dotenv import load_dotenv
 load_dotenv()
@@ -14,7 +14,7 @@ import time
 import pandas as pd
 from src.tmdb_client import get_poster_and_overview
 
-TOP_N = 150
+TOP_N = 200
 
 
 def main():
@@ -29,12 +29,12 @@ def main():
         movie = movies_lookup.get(int(row['movie_id']))
         if not movie:
             continue
-        result = get_poster_and_overview(movie['title'], movie.get('year'))
+        result = get_poster_and_overview(movie.get('tmdb_id'))
         if result.get('poster_url'):
             fetched += 1
         else:
             skipped += 1
-        time.sleep(0.05)  # stay well under TMDB's rate limit
+        time.sleep(0.05)
 
     print(f"Done. Posters found: {fetched}, not found: {skipped}")
     print("Cached to data/processed/poster_cache.json")

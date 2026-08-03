@@ -34,7 +34,7 @@ def popular_movies(limit: int = 48):
         movie = MOVIES_BY_ID.get(int(movie_id))
         if not movie:
             continue
-        poster_info = get_poster_and_overview(movie["title"], movie.get("year"))
+        poster_info = get_poster_and_overview(movie.get("tmdb_id"))
         results.append({**movie, **poster_info})
     return {"results": results}
 
@@ -47,7 +47,7 @@ def search_movies(q: str, limit: int = 24):
     matches = [m for m in MOVIES if q_lower in m["title"].lower()]
     results = []
     for movie in matches[:limit]:
-        poster_info = get_poster_and_overview(movie["title"], movie.get("year"))
+        poster_info = get_poster_and_overview(movie.get("tmdb_id"))
         results.append({**movie, **poster_info})
     return {"results": results}
 
@@ -57,7 +57,7 @@ def get_movie(movie_id: int):
     movie = MOVIES_BY_ID.get(movie_id)
     if not movie:
         raise HTTPException(status_code=404, detail="Movie not found")
-    poster_info = get_poster_and_overview(movie["title"], movie.get("year"))
+    poster_info = get_poster_and_overview(movie.get("tmdb_id"))
     return {**movie, **poster_info}
 
 
@@ -78,7 +78,7 @@ def predict(req: PredictRequest):
         raise HTTPException(status_code=404, detail=f"user_id {req.user_id} not found in dataset (try 1-943)")
 
     movie = MOVIES_BY_ID.get(req.movie_id, {})
-    poster_info = get_poster_and_overview(movie.get("title", ""), movie.get("year")) if movie else {}
+    poster_info = get_poster_and_overview(movie.get("tmdb_id")) if movie else {}
 
     return {
         "predicted_rating": rating,

@@ -1,84 +1,116 @@
 import pandas as pd
+import numpy as np
 import re
+import json
 
-GENRE_COLS = [
-    'unknown', 'Action', 'Adventure', 'Animation', "Children's", 'Comedy',
-    'Crime', 'Documentary', 'Drama', 'Fantasy', 'Film-Noir', 'Horror',
-    'Musical', 'Mystery', 'Romance', 'Sci-Fi', 'Thriller', 'War', 'Western'
-]
+DATA_DIR = 'data/raw/ml-latest-small'
 
 
 def load_data():
-    ratings = pd.read_csv('data/raw/ml-100k/u.data',
-                           sep='\t',
-                           names=['user_id', 'movie_id', 'rating', 'timestamp'])
-
-    item_cols = ['movie_id', 'title', 'release_date', 'video_release_date', 'imdb_url'] + GENRE_COLS
-    movies = pd.read_csv('data/raw/ml-100k/u.item',
-                          sep='|',
-                          encoding='latin-1',
-                          names=item_cols)
-
-    users = pd.read_csv('data/raw/ml-100k/u.user',
-                         sep='|',
-                         names=['user_id', 'age', 'gender', 'occupation', 'zip_code'])
-
-    return ratings, movies, users
+    movies = pd.read_csv(f'{DATA_DIR}/movies.csv')
+    ratings = pd.read_csv(f'{DATA_DIR}/ratings.csv')
+    links = pd.read_csv(f'{DATA_DIR}/links.csv')
+    return movies, ratings, links
 
 
 def extract_year(title):
-    # Titles look like "Toy Story (1995)"
     match = re.search(r'\((\d{4})\)', str(title))
     return int(match.group(1)) if match else None
 
 
-def build_movies_lookup(movies):
-    """Small reference table used later for search / display, not for training."""
-    lookup = movies[['movie_id', 'title']].copy()
+def get_all_genres(movies):
+    genre_set = set()
+    for g in movies['genres']:
+        if g == '(no genres listed)':
+            continue
+        genre_set.update(g.split('|'))
+    return sorted(genre_set)
+
+
+def build_movies_lookup(movies, links):
+    """Reference table used for search / display / poster lookup, not training."""
+    lookup = movies[['movieId', 'title']].copy()
+    lookup = lookup.rename(columns={'movieId': 'movie_id'})
     lookup['year'] = movies['title'].apply(extract_year)
-    genre_lists = movies[GENRE_COLS].apply(
-        lambda row: [g for g, v in zip(GENRE_COLS, row) if v == 1], axis=1
+    lookup['year'] = lookup['year'].astype('Int64')
+    lookup['genres'] = movies['genres'].apply(
+        lambda g: [] if g == '(no genres listed)' else g.split('|')
     )
-    lookup['genres'] = genre_lists
+    links_renamed = links.rename(columns={'movieId': 'movie_id', 'tmdbId': 'tmdb_id'})
+    lookup = lookup.merge(links_renamed[['movie_id', 'tmdb_id']], on='movie_id', how='left')
+    lookup['tmdb_id'] = lookup['tmdb_id'].astype('Int64')
     return lookup
 
 
-def preprocess(ratings, movies, users):
-    df = ratings.merge(movies, on='movie_id').merge(users, on='user_id')
+def preprocess(movies, ratings, links):
+    all_genres = get_all_genres(movies)
 
-    # movie popularity / quality features (as before)
+    genre_data = {
+        genre: movies['genres'].apply(lambda g: int(genre in g.split('|')) if g != '(no genres listed)' else 0)
+        for genre in all_genres
+    }
+    movies_with_genres = pd.concat([movies[['movieId', 'title']], pd.DataFrame(genre_data)], axis=1)
+
+    df = ratings.merge(movies_with_genres, on='movieId')
+    df = df.rename(columns={'userId': 'user_id', 'movieId': 'movie_id'})
+
     movie_stats = df.groupby('movie_id')['rating'].agg(['count', 'mean']).reset_index()
     movie_stats.columns = ['movie_id', 'num_ratings', 'avg_rating']
     df = df.merge(movie_stats, on='movie_id')
 
-    # release year
     df['release_year'] = df['title'].apply(extract_year)
     df['release_year'] = df['release_year'].fillna(df['release_year'].median())
 
-    # gender as binary
-    df['is_male'] = (df['gender'] == 'M').astype(int)
+    # user rating-behavior features — this dataset has no age/gender/occupation,
+    # so we use each user's own rating tendency instead
+    user_stats = df.groupby('user_id')['rating'].agg(['count', 'mean']).reset_index()
+    user_stats.columns = ['user_id', 'user_num_ratings', 'user_avg_rating']
+    df = df.merge(user_stats, on='user_id')
 
-    # occupation as one-hot (21 categories in ml-100k, small enough to one-hot)
-    occupation_dummies = pd.get_dummies(df['occupation'], prefix='occ').astype(int)
-    df = pd.concat([df, occupation_dummies], axis=1)
+    # user-genre affinity — how much THIS user tends to like THESE genres,
+    # not just how popular the movie is overall. Build a per-user, per-genre
+    # average rating table (their personal taste profile), then for every
+    # rating compute the user's average affinity across the genres that
+    # specific movie has.
+    global_mean_rating = df['rating'].mean()
 
-    # drop columns not used as features
-    df = df.drop(columns=[
-        'timestamp', 'title', 'release_date', 'video_release_date',
-        'imdb_url', 'gender', 'occupation', 'zip_code'
-    ])
+    genre_ratings = []
+    for genre in all_genres:
+        subset = df[df[genre] == 1][['user_id', 'rating']].copy()
+        subset['genre'] = genre
+        genre_ratings.append(subset)
+    long_df = pd.concat(genre_ratings, ignore_index=True)
+
+    user_genre_pref = long_df.groupby(['user_id', 'genre'])['rating'].mean().unstack('genre')
+    genre_overall_avg = long_df.groupby('genre')['rating'].mean()
+    user_genre_pref = user_genre_pref.reindex(columns=all_genres)
+    user_genre_pref = user_genre_pref.reindex(df['user_id'].unique())
+    user_genre_pref = user_genre_pref.fillna(genre_overall_avg)
+    user_genre_pref = user_genre_pref.fillna(global_mean_rating)
+    user_genre_pref.to_csv('data/processed/user_genre_pref.csv')
+
+    user_pref_aligned = user_genre_pref.loc[df['user_id']].reset_index(drop=True)
+    genre_flags = df[all_genres].values
+    genre_counts = genre_flags.sum(axis=1)
+    weighted_sum = (user_pref_aligned.values * genre_flags).sum(axis=1)
+    affinity = np.divide(weighted_sum, genre_counts,
+                        out=np.full_like(weighted_sum, global_mean_rating, dtype=float),
+                        where=genre_counts != 0)
+    df['user_genre_affinity'] = affinity
+
+    with open('data/processed/global_mean_rating.json', 'w') as f:
+        json.dump({'global_mean_rating': float(global_mean_rating)}, f)
+
+    df = df.drop(columns=['timestamp', 'title'])
 
     df.to_csv('data/processed/processed_ratings.csv', index=False)
     print(f"Saved to data/processed/processed_ratings.csv  ({df.shape[0]} rows, {df.shape[1]} cols)")
 
-    # one row per movie: everything predict.py needs to fill in movie-side features
-    movie_feature_cols = ['movie_id', 'num_ratings', 'avg_rating', 'release_year'] + GENRE_COLS
+    movie_feature_cols = ['movie_id', 'num_ratings', 'avg_rating', 'release_year'] + all_genres
     movie_features = df[movie_feature_cols].drop_duplicates(subset='movie_id')
     movie_features.to_csv('data/processed/movie_features.csv', index=False)
 
-    # one row per user: everything predict.py needs to fill in user-side features
-    occ_cols = [c for c in df.columns if c.startswith('occ_')]
-    user_feature_cols = ['user_id', 'age', 'is_male'] + occ_cols
+    user_feature_cols = ['user_id', 'user_num_ratings', 'user_avg_rating']
     user_features = df[user_feature_cols].drop_duplicates(subset='user_id')
     user_features.to_csv('data/processed/user_features.csv', index=False)
 
@@ -89,11 +121,10 @@ def preprocess(ratings, movies, users):
 
 
 if __name__ == "__main__":
-    ratings, movies, users = load_data()
-    df = preprocess(ratings, movies, users)
+    movies, ratings, links = load_data()
+    df = preprocess(movies, ratings, links)
 
-    # also save a lightweight movie lookup table for search / display / prediction
-    lookup = build_movies_lookup(movies)
+    lookup = build_movies_lookup(movies, links)
     lookup.to_json('data/processed/movies_lookup.json', orient='records')
     print(f"Saved movies_lookup.json ({len(lookup)} movies)")
 
