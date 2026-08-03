@@ -19,7 +19,14 @@ with open("data/processed/movies_lookup.json") as f:
 MOVIES_BY_ID = {m["movie_id"]: m for m in MOVIES}
 
 _movie_features = pd.read_csv("data/processed/movie_features.csv").set_index("movie_id")
-_popular_movie_ids = _movie_features.sort_values("num_ratings", ascending=False).index.tolist()
+# Movies excluded from the homepage grid only (still fully searchable) —
+# e.g. posters not suitable for a general-audience landing page
+HOMEPAGE_EXCLUDED_IDS = {2858}  # American Beauty (1999)
+
+_popular_movie_ids = [
+    m for m in _movie_features.sort_values("num_ratings", ascending=False).index.tolist()
+    if m not in HOMEPAGE_EXCLUDED_IDS
+]
 
 
 class PredictRequest(BaseModel):
