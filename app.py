@@ -19,14 +19,55 @@ with open("data/processed/movies_lookup.json") as f:
 MOVIES_BY_ID = {m["movie_id"]: m for m in MOVIES}
 
 _movie_features = pd.read_csv("data/processed/movie_features.csv").set_index("movie_id")
-# Movies excluded from the homepage grid only (still fully searchable) —
-# e.g. posters not suitable for a general-audience landing page
-HOMEPAGE_EXCLUDED_IDS = {2858}  # American Beauty (1999)
 
-_popular_movie_ids = [
-    m for m in _movie_features.sort_values("num_ratings", ascending=False).index.tolist()
-    if m not in HOMEPAGE_EXCLUDED_IDS
-]
+_popular_movie_ids = _movie_features.sort_values("num_ratings", ascending=False).index.tolist()
+
+_NON_GENRE_COLS = {"num_ratings", "avg_rating", "release_year"}
+ALL_GENRES = sorted([c for c in _movie_features.columns if c not in _NON_GENRE_COLS])
+
+
+def _decade_of(year):
+    if pd.isna(year):
+        return None
+    return int(year) // 10 * 10
+
+
+@app.get("/api/genres")
+def get_genres():
+    return {"genres": ALL_GENRES}
+
+@app.get("/api/decades")
+def get_decades():
+    years = _movie_features["release_year"].dropna()
+    decades = sorted({int(y) // 10 * 10 for y in years}, reverse=True)
+    return {"decades": decades}
+
+@app.get("/api/movies/browse")
+def browse_movies(genre: str = None, decade: int = None, sort: str = "popularity", limit: int = 48):
+    candidates = _movie_features.copy()
+
+    if genre and genre in candidates.columns:
+        candidates = candidates[candidates[genre] == 1]
+
+    if decade is not None:
+        candidates = candidates[candidates["release_year"].apply(_decade_of) == decade]
+
+    if sort == "rating":
+        candidates = candidates[candidates["num_ratings"] >= 20]
+        candidates = candidates.sort_values("avg_rating", ascending=False)
+    elif sort == "newest":
+        candidates = candidates.sort_values("release_year", ascending=False)
+    else:
+        candidates = candidates.sort_values("num_ratings", ascending=False)
+
+    results = []
+    for movie_id in candidates.index[:limit]:
+        movie = MOVIES_BY_ID.get(int(movie_id))
+        if not movie:
+            continue
+        poster_info = get_poster_and_overview(movie.get("tmdb_id"))
+        results.append({**movie, **poster_info})
+    return {"results": results}
 
 
 class PredictRequest(BaseModel):
@@ -143,6 +184,11 @@ def home():
                 font-size: 14px; outline: none;
             }
             .search-box input::placeholder { color: #777; }
+            .controls select {
+                background: #24243a; color: #ddd; border: none; border-radius: 8px;
+                padding: 8px 12px; font-size: 13px; cursor: pointer; outline: none;
+            }
+            .controls select:hover { background: #2d2d45; }
             main { padding: 8px 28px 60px; }
             .section-label {
                 font-size: 14px; color: #999; margin: 18px 0 14px; letter-spacing: 0.3px;
@@ -208,6 +254,17 @@ def home():
                     <input type="number" id="userId" placeholder="1-943" min="1" max="943">
                 </div>
                 <button class="dice-btn" id="randomUserBtn" title="Random user">🎲</button>
+                <select id="genreFilter">
+                    <option value="">All genres</option>
+                </select>
+                <select id="decadeFilter">
+                    <option value="">All decades</option>
+                </select>
+                <select id="sortFilter">
+                    <option value="popularity">Most rated</option>
+                    <option value="rating">Highest rated</option>
+                    <option value="newest">Newest</option>
+                </select>
                 <div class="search-box">
                     <input type="text" id="movieSearch" placeholder="Search movies..." autocomplete="off">
                 </div>
@@ -268,18 +325,61 @@ def home():
                 });
             }
 
-            async function loadPopular() {
-                sectionLabel.textContent = 'Most rated';
-                const res = await fetch('/api/movies/popular?limit=48');
+            const genreFilter = document.getElementById('genreFilter');
+            const decadeFilter = document.getElementById('decadeFilter');
+            const sortFilter = document.getElementById('sortFilter');
+
+            async function loadGenres() {
+                const res = await fetch('/api/genres');
+                const data = await res.json();
+                data.genres.forEach(g => {
+                    const opt = document.createElement('option');
+                    opt.value = g;
+                    opt.textContent = g;
+                    genreFilter.appendChild(opt);
+                });
+            }
+
+            async function loadDecades() {
+                const res = await fetch('/api/decades');
+                const data = await res.json();
+                data.decades.forEach(d => {
+                    const opt = document.createElement('option');
+                    opt.value = d;
+                    opt.textContent = `${d}s`;
+                    decadeFilter.appendChild(opt);
+                });
+            }
+
+            async function loadBrowse() {
+                const genre = genreFilter.value;
+                const decade = decadeFilter.value;
+                const sort = sortFilter.value;
+
+                const labelParts = [];
+                labelParts.push(sort === 'rating' ? 'Highest rated' : sort === 'newest' ? 'Newest' : 'Most rated');
+                if (genre) labelParts.push(genre);
+                if (decade) labelParts.push(`${decade}s`);
+                sectionLabel.textContent = labelParts.join(' · ');
+
+                const params = new URLSearchParams({ sort, limit: 48 });
+                if (genre) params.set('genre', genre);
+                if (decade) params.set('decade', decade);
+
+                const res = await fetch(`/api/movies/browse?${params}`);
                 const data = await res.json();
                 renderGrid(data.results);
             }
+
+            genreFilter.addEventListener('change', loadBrowse);
+            decadeFilter.addEventListener('change', loadBrowse);
+            sortFilter.addEventListener('change', loadBrowse);
 
             let debounceTimer = null;
             movieSearch.addEventListener('input', () => {
                 clearTimeout(debounceTimer);
                 const q = movieSearch.value.trim();
-                if (!q) { loadPopular(); return; }
+                if (!q) { loadBrowse(); return; }
                 debounceTimer = setTimeout(async () => {
                     sectionLabel.textContent = `Results for "${q}"`;
                     const res = await fetch(`/api/movies/search?q=${encodeURIComponent(q)}`);
@@ -338,7 +438,9 @@ def home():
                 if (e.target === modalOverlay) modalOverlay.classList.remove('active');
             });
 
-            loadPopular();
+            loadGenres();
+            loadDecades();
+            loadBrowse();
         </script>
     </body>
     </html>
