@@ -38,7 +38,7 @@ avg_rating              0.4396
 user_genre_affinity     0.3840   <- personalization signal
 user_avg_rating         0.0426
 user_num_ratings        0.0259
-num_ratings              0.0235
+num_ratings             0.0235
 ```
 
 ## Feature Engineering
